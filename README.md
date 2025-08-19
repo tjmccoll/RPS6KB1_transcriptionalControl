@@ -9,7 +9,14 @@ This tool is being developed by the [Clarke Laboratory for Quantitative Exercise
 > (update with BioRxiv link)
 
 ## Getting started
-The 'McColl_2025_multifactorialCauseOfAnabolicResistance_250801' folder contains all required files () to run the MPSA, simulations, and replicate the manuscript figures.
+The 'McColl_2025_rps6kb1TranscriptionalControl_250819' folder contains all the files generated in this manuscript.
+
+### Installation
+Download the package to a local folder (e.g., '~/RPS6KB1_transcriptionalControl/') by extracting the ZIP file or by running the following terminal command: 
+```
+git clone https://github.com/tjmccoll/MuscleProteinSynthesisKineticModel.git
+```
+
 
 
 
