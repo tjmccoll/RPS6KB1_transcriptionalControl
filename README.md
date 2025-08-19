@@ -6,7 +6,7 @@ This study applies the [Causal Reasoning pipeline for Network identification usi
 
 This tool is being developed by the [Clarke Laboratory for Quantitative Exercise Biology](https://www.sfu.ca/clarkelab-bpk.html). Further information can be found in the following study.
 
-> (update with BioRxIv link)
+> (update with BioRxiv link)
 
 ## Getting started
 The 'McColl_2025_multifactorialCauseOfAnabolicResistance_250801' folder contains all required files () to run the MPSA, simulations, and replicate the manuscript figures.
