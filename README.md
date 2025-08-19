@@ -26,6 +26,8 @@ To simulate the manuscript code:
 4. The CARNIVAL network inference code (section 6) includes details for commenting in/out lines of code to run CARNIVAL with either the aerobic or resistance exercise data.
 
 ### File list
+#### CytoscapeNetworks
+* '250202_networks.cys': contains eight versions of the generated CARNIVAL networks. For both the aerobic and resistance exercise data, the file contains CARNIVAL specific networks for all exercise sensors, intracellular sensors, hormonal sensors, and the inverse CARNIVAL network.
 #### Dickinson_2018
 * 'GSE107934_RAW': contains the raw RNAseq count data from Dickinson et al. 2018
 #### Outputs
