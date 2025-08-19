@@ -1,0 +1,1554 @@
+---
+title: "stdCARNIVAL - robust approach"
+author: "Taylor McColl"
+date: "2025-08-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls()) 
+
+knitr::opts_chunk$set(echo = TRUE)
+
+# Update according to the root directory in which you saved the repository
+repo_root <- "/Users/taylormccoll/Documents/SFU/1. Ph.D./1. Research Projects/4. Bioinformatic analysis of p70S6K/3. Manuscript/2. Writing/Complete manuscript/250817_complete manuscript/Code"
+
+knitr::opts_knit$set(root.dir = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819"))
+```
+
+## Introduction
+Here I analyze the transcriptional regulation of RPS6KB1 using the data from Dickinson (2018). The Dickinson (2018) provides data on 6 subjects at basal, 1 and 4 hours following aerobic or resistance exercise.
+
+```{r, message=FALSE}
+## loading libraries
+library(plyr)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(reshape)
+library(pheatmap)
+library(gridExtra)
+library(grid)
+library(cowplot)
+library(ggrepel)
+library(hexbin)
+library(vsn)
+source("Support/support_functions.R")
+```
+
+### 1: Data importing and manipulation
+Data is imported and combined in a single data frame. Each data set is added as a separate column
+
+```{r, message=FALSE}
+knitr::opts_knit$set(root.dir = '/tmp')
+
+## set working directory
+setwd(file.path(repo_root, "/McColl_2025_rps6kb1TranscriptionalControl_250819/Dickinson_2018/GSE107934_RAW"))
+
+## list all files ending in in 'txt.gz'
+fileList = list.files(pattern = ".*.txt.gz") 
+data_all = list.files(pattern = ".*.txt.gz") %>%
+  lapply(read.table) %>%
+  bind_cols
+
+## dim(data_all) gives a 58,002 by 58 matrix, hence from 2 to 58, skipping every other column gives
+## the response values excluding the gene names
+## reserve all rows but tidy the columns
+count_df = data_all[,c(seq(2,58,2))]
+count_df
+
+## append row names (ENSG*) from data_all to count_df
+row.names(count_df) = data_all$V1...1
+count_df
+
+# Combining the individual data files
+# 'P' = Participant, 'AT' = aerobic exercise, 'RT' = resistance exercise
+dataSet_names = c("basal.P1", "AT.1h.P1", "AT.4h.P1", "RT.1h.P1", "RT.4h.P1",
+                  "basal.P2", "AT.1h.P2", "AT.4h.P2", "RT.1h.P2", "RT.4h.P2",
+                  "basal.P3", "AT.1h.P3", "AT.4h.P3", "RT.1h.P3", "RT.4h.P3",
+                  "basal.P4", "AT.1h.P4",             "RT.1h.P4", "RT.4h.P4",
+                  "basal.P5", "AT.1h.P5", "AT.4h.P5", "RT.1h.P5", "RT.4h.P5",
+                  "basal.P7", "AT.1h.P7", "AT.4h.P7", "RT.1h.P7", "RT.4h.P7")
+
+# setting column names
+names(count_df) = dataSet_names
+
+head(count_df)
+```
+
+## Pre-processing and normalization
+Create a dataframe `targets` to summarize the experimental design.
+
+```{r}
+## create an empty NA matrix of 29 by 2
+targets <- as.data.frame(matrix(NA,length(names(count_df)),2))
+
+## change the column names of targets
+names(targets) <- c("sample","condition")
+
+## change the row names of targets under 'sample' to 'basal.P1', ...
+targets$sample <- names(count_df)
+
+## remove the participants ('P1', 'P2', ...) in column names of count_df and append under 'condition'
+## column of 'targets'
+targets$condition <- gsub(".P[1-7]$","",targets$sample)
+
+head(targets)
+```
+
+Apply a log2 transformation to the data and replace 'zero' counts with NA
+Plot data to check following the transformation (no normalization applied)
+```{r}
+## Retain rows with a positive sum
+count_df <- count_df[rowSums(count_df) > 0,]
+
+## Remaining 0 entries have to be made as NA so that log2 transformation is possible (cannot log on zero's)
+count_df[count_df == 0] <- NA
+
+# make the plots using PCA analysis
+plots <- magicPlotMakerLight(df = log2(count_df), targets = targets)
+plot(plots[[1]] + geom_hline(yintercept=0.5)) #violin plot gemo_hline() to see where bimodal starts
+plot(plots[[2]]) 
+```
+
+```{R}
+# Manuscript figure
+df = reshape::melt(log2(count_df)) # both res and aerobic ex
+index = c(1:length(df[,1]))
+
+violinPlot_pre = ggplot(data = df, aes(x = (variable), y = value, group = variable, color = variable)) +
+  geom_violin() +
+  ggtitle("Raw count data") +
+  ylab("log2(Count)") +
+  theme (axis.text.x = element_blank(),
+         axis.ticks.x = element_blank()) +
+  xlab("Dataset")
+
+# violinPlot_pre = violinPlot_pre + guides(color = guide_legend(nrow = 9, title = ""))
+violinPlot_pre = violinPlot_pre + guides(color = guide_legend(nrow = 15, title = ""))
+
+print(violinPlot_pre)
+```
+
+There is a bimodal distribution based on the violin plot. This is usually because many genes are expressed under the RNAseq detection threshold and will give rise to a noisy sub-distribution. Therefore, we want to remove those reads.
+The bimodal distribution occurs at ~0.5 logs(counts), such that we remove transcripts below this cut-off.
+```{r}
+count_df[log2(count_df) < 0.5 ] <- NA
+count_df <- count_df[rowSums(is.na(count_df[,c(1:3)])) < 2,] #c(1:3): basal.P1 AT.1h.P1 AT.4h.P1
+count_df <- count_df[rowSums(is.na(count_df[,c(4:6)])) < 2,] #c(4:6): RT.1h.P1 RT.4h.P1 basal.P2
+```
+
+## VSN Normalization
+Now we can normalize the cleaned dataframe using vsn
+```{r}
+fit <- vsn::vsnMatrix(as.matrix(count_df)) #train vsn parameters
+meanSdPlot(fit)
+```
+The mean/sd trend is reasonably flat (i.e., red line) and there is minimal fragmenting. Good to continue
+
+```{r}
+## predict using the fit data from last step
+count_df_vsn <- as.data.frame(vsn::predict(fit, as.matrix(count_df)))
+```
+
+```{r}
+## Test if subjects separate into distinct groups based on the continuous response - expression level
+## PC1: explains most of the variability, best fit of data points
+plots <- magicPlotMakerLight(df = log2(count_df_vsn), targets = targets)
+plot(plots[[1]]) #violins
+plot(plots[[2]]) #PCA
+```
+
+```{R}
+# Manuscript figure
+df = reshape::melt(log2(count_df_vsn)) # both res and aerobic ex
+index = c(1:length(df[,1]))
+
+violinPlot_post = ggplot(data = df, aes(x = (variable), y = value, group = variable, color = variable)) +
+  geom_violin() +
+  ggtitle("Processed count data") +
+  ylab("Normalized counts") +
+  theme (axis.text.x = element_blank(),
+         axis.ticks.x = element_blank()) +
+  xlab("Dataset")
+
+violinPlot_post = violinPlot_post + guides(color = guide_legend(nrow = 15, title = ""))
+
+print(violinPlot_post)
+```
+```{R}
+# Manuscript figure - combined
+library("ggpubr")
+violinPlot_both = ggarrange(violinPlot_pre, violinPlot_post,
+                           ncol = 2, nrow = 1,
+                           labels = c("A.", "B."),
+                           common.legend = TRUE, legend = "right")
+print(violinPlot_both)
+  
+ggsave(file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Figures/violinPlot_both_v2.pdf"),
+       plot = violinPlot_both,
+       width = 11,
+       height = 5,
+       units = "in",
+       device = "pdf")
+```
+
+## Identifier kung-fu (i.e., switching from Ensembl IDs to UniProt)
+```{r}
+## this identifier matching dataframe was retrieved from uniprot:
+## trim_ws: trim the leading and trailing white spaces
+## escape_double: replace """" double quotes with single \"
+
+## read from uniprot mapping file and remove NA entries
+gene_id_mapping_from_uniprot <- as.data.frame(
+  read_delim(file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Support/gene_id_mapping_from_uniprot.tab"), 
+             "\t", escape_double = FALSE, trim_ws = TRUE))
+gene_id_mapping_from_uniprot <- gene_id_mapping_from_uniprot[!is.na(gene_id_mapping_from_uniprot$`Gene names`),]
+
+## pseudo dictionary to make the mapping efficient
+## gsub: substitute regex .* with gene names from uniprot
+## gsub pattern: space followed by 0 or more chars, replaced by "" in gene names
+ensembl_to_symbol <- gsub(" .*","",gene_id_mapping_from_uniprot$`Gene names`)
+
+## map the uniprot names with genes in our experiment
+## now each ENSG* is mapped to its corresponding gene name
+names(ensembl_to_symbol) <- gene_id_mapping_from_uniprot[,1]
+
+## remove all genes that have no gene symbol from our count dataframe
+row.names(count_df_vsn) <- gsub("[.][1-7]*","",row.names(count_df_vsn))
+
+## eliminate the gene names not mapped to ensembl_to_symbol
+count_df_vsn <- count_df_vsn[row.names(count_df_vsn) %in% names(ensembl_to_symbol),]
+
+## Convert IDs with the pseudo dictionary
+## gene names are replaced with those from uniprot
+for(i in 1:length(count_df_vsn[,1]))
+{
+  row.names(count_df_vsn)[i] <- ensembl_to_symbol[row.names(count_df_vsn)[i]]
+}
+
+```
+
+## Write count and target files for further analysis
+```{r}
+to_write <- count_df_vsn
+to_write$gene <- row.names(to_write)
+
+## to write has one extra row with gene compared to count_df_vsn
+to_write <- to_write[,c(length(to_write[1,]),1:(length(to_write[1,])-1))]
+write_csv(to_write, 
+          file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Data/count_df_vsn.csv"))
+write_csv(targets, file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Data/targets.csv"))
+```
+
+### 2: Differential analysis
+Differential analysis of the transcriptomic data
+```{r}
+library(limma)
+```
+
+### Limma differential analysis
+Simple differential analysis using Limma
+```{r}
+unique(targets$condition)
+comparisons = list("B_vs_AT.1h"=c(2,-1), "B_vs_AT.4h"=c(3,-1), "AT.1h_vs_AT.4h"=c(3,-2), 
+                   "B_vs_RT.1h"=c(4,-1), "B_vs_RT.4h"=c(5,-1), "RT.1h_vs_RT.4h"=c(5,-4))  
+limmaRes = runLimma(measurements = count_df_vsn,
+                    targets = targets,
+                    comparisons = comparisons)
+```
+
+Extract the statistics dataframe from limma to summarize the differential analysis
+```{r}
+#toptable: Extract a table of the top-ranked genes from a linear model fit.
+#toptable parameters:
+#fit: For topTable, fit should be an object of class MArrayLM as produced by lmFit and eBayes.
+#coef: column number or column name specifying which coefficient or contrast of the linear model is of interest. Here, we refer to comparison #1 (basal_vs_AT.1h or c(2,-1))
+#number: maximum number of genes to list: 8470
+
+#'This function is simply designed to format the toptable of limma with first column as gene identifiers instead of only row.names.'
+#'@param ttop a toptable dataframe generated by the topTable function of limma
+#Basal versus AT 1 hour (change later - 1 vs basal)
+ttop_B_vs_AT.1h <- ttopFormatter(topTable(limmaRes[[1]], coef = 1, number = length(count_df_vsn[,1]), adjust.method = "fdr"))
+
+# qqplot
+#rnorm: random generation for the normal distribution, pnorm: distribution function for the normal distribution
+null_model <- pnorm(rnorm(length(ttop_B_vs_AT.1h[,1])))
+data = data.frame(nullModel = (null_model), AT_1h_pValue = ttop_B_vs_AT.1h$P.Value)
+qqPlot_AT1h = ggplot(data = data, 
+                     aes(x=sort(null_model), y = sort(ttop_B_vs_AT.1h$P.Value))) +
+                     xlim(c(1,0)) +
+                     ylim(c(1,0)) +
+                     geom_point(shape=1, color = 'black', size=1) +
+                     ggtitle("Baseline versus 1-hour post aerobic exercise") +
+                     ylab("Observed p-value") +
+                     xlab("Theoretical quantile") +
+                     geom_abline(intercept=0, slope = 1)
+print(qqPlot_AT1h)
+
+# save figure
+ggsave(file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Figures/qqPlot_baselineVsAt1h.pdf"),
+       plot = qqPlot_AT1h,
+       width = 11/2,
+       height = 8.5/2,
+       units = "in",
+       device = "pdf")
+```
+This plot is used to see the deviance from the diagonal line. Deviance above the diagonal indicates an increase in expression (smaller p-values vs a random sample), deviance below the diagonal indicates a lower level of expression (larger p-value vs a random sample).
+There is a lack of expression between basal and AT.1hr
+
+```{r}
+#Basal versus AT 4 hour
+ttop_B_vs_AT.4h <- ttopFormatter(topTable(limmaRes[[1]], coef = 2, number = length(count_df_vsn[,1]), adjust.method = "fdr"))
+
+#make a qqplot
+null_model <- pnorm(rnorm(length(ttop_B_vs_AT.4h[,1])))
+data = data.frame(nullModel = (null_model), AT_4h_pValue = ttop_B_vs_AT.4h$P.Value)
+qqPlot_AT4h = ggplot(data = data, 
+                     aes(x=sort(null_model), y = sort(ttop_B_vs_AT.4h$P.Value))) +
+                     xlim(c(1,0)) +
+                     ylim(c(1,0)) +
+                     geom_point(shape=1, color = 'black', size=1) +
+                     ggtitle("Baseline versus 4-hour post aerobic exercise") +
+                     ylab("Observed p-value") +
+                     xlab("Theoretical quantile") +
+                     geom_abline(intercept=0, slope = 1)
+print(qqPlot_AT4h)
+
+# save figure
+ggsave(file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Figures/qqPlot_baselineVsAt4h.pdf"),
+       plot = qqPlot_AT4h,
+       width = 11/2,
+       height = 8.5/2,
+       units = "in",
+       device = "pdf")
+```
+There is an increase in expression between basal and AT.4hr (deviance above diagonal)
+
+```{r}
+#Basal versus RT 1 hour
+ttop_B_vs_RT.1h <- ttopFormatter(topTable(limmaRes[[1]], coef = 4, number = length(count_df_vsn[,1]), adjust.method = "fdr"))
+
+#make a qqplot
+null_model <- pnorm(rnorm(length(ttop_B_vs_RT.1h[,1])))
+data = data.frame(nullModel = (null_model), RT_1h_pValue = ttop_B_vs_RT.1h$P.Value)
+qqPlot_RT1h = ggplot(data = data, 
+                     aes(x=sort(null_model), y = sort(ttop_B_vs_RT.1h$P.Value))) +
+                     xlim(c(1,0)) +
+                     ylim(c(1,0)) +
+                     geom_point(shape=1, color = 'black', size=1) +
+                     ggtitle("Baseline versus 1-hour post resistance exercise") +
+                     ylab("Observed p-value") +
+                     xlab("Theoretical quantile") +
+                     geom_abline(intercept=0, slope = 1)
+print(qqPlot_RT1h)
+
+# save figure
+ggsave(file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Figures/qqPlot_baselineVsRt1h.pdf"),
+       plot = qqPlot_RT1h,
+       width = 11/2,
+       height = 8.5/2,
+       units = "in",
+       device = "pdf")
+```
+Low level of expression
+
+```{r}
+#Basal versus RT 4 hour
+ttop_B_vs_RT.4h <- ttopFormatter(topTable(limmaRes[[1]], coef = 5, number = length(count_df_vsn[,1]), adjust.method = "fdr"))
+
+#make a qqplot
+null_model <- pnorm(rnorm(length(ttop_B_vs_RT.4h[,1])))
+data = data.frame(nullModel = (null_model), RT_4h_pValue = ttop_B_vs_RT.4h$P.Value)
+qqPlot_RT4h = ggplot(data = data, 
+                     aes(x=sort(null_model), y = sort(ttop_B_vs_RT.4h$P.Value))) +
+                     xlim(c(1,0)) +
+                     ylim(c(1,0)) +
+                     geom_point(shape=1, color = 'black', size=1) +
+                     ggtitle("Baseline versus 4-hour post resistance exercise") +
+                     ylab("Observed p-value") +
+                     xlab("Theoretical quantile") +
+                     geom_abline(intercept=0, slope = 1)
+print(qqPlot_RT4h)
+
+# save figure
+ggsave(file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Figures/qqPlot_baselineVsRt4h.pdf"),
+       plot = qqPlot_RT4h,
+       width = 11/2,
+       height = 8.5/2,
+       units = "in",
+       device = "pdf")
+```
+Quite high level of expression
+
+The baseline vs AT 4 hour and baseline vs RT 4 hour have the highest levels of expression. Comparatively, baseline vs AT or RT at 1 hour showed little expression, such that neither are evaluated in further analyses. 
+
+##Write the differential analysis output
+```{r}
+write_csv(ttop_B_vs_AT.1h, 
+          file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Data/ttop_B_vs_AT.1h.csv")) #no diff
+write_csv(ttop_B_vs_AT.4h, 
+          file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Data/ttop_B_vs_AT.4h.csv"))
+write_csv(ttop_B_vs_RT.1h, 
+          file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Data/ttop_B_vs_RT.1h.csv")) #no diff
+write_csv(ttop_B_vs_RT.4h, 
+          file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Data/ttop_B_vs_RT.4h.csv")) #high
+```
+
+### 3: Pathway activity (PROGENy)
+Here I estimate the pathway activity from the Dickinson transcriptomic data using PROGENy
+
+```{r}
+#loading additional libraries
+library(progeny)
+library(dorothea)
+library(tibble)
+library(tidyr)
+```
+
+```{r}
+Normalised_counts = count_df_vsn
+Experimental_design = targets
+```
+
+Adjusting the format of the input files to make it suitable for PROGENy
+
+```{r}
+Normalised_counts_matrix <- Normalised_counts %>% 
+    dplyr::mutate_if(~ any(is.na(.x)),~ if_else(is.na(.x),0,.x)) %>% 
+    as.matrix()
+
+#Comparison of each condition
+ttop_B_vs_AT.4h_matrix <- ttop_B_vs_AT.4h %>% 
+    dplyr::select(ID, t) %>% 
+    dplyr::filter(!is.na(t)) %>% 
+    dplyr::select(-"ID") %>%
+    as.matrix()
+
+ttop_B_vs_RT.4h_matrix <- ttop_B_vs_RT.4h %>% 
+    dplyr::select(ID, t) %>% 
+    dplyr::filter(!is.na(t)) %>% 
+    dplyr::select(-"ID") %>%
+    as.matrix()
+```
+
+## Pathway activity with Progeny (pathway activity estimator)
+PROGENy estimates the activity of signaling pathways by combining corresponding gene sets with a linear model.
+
+First, compute Progeny scores for every sample (with the replicates) using the normalized counts. It is worth noting that we are going to use the 100 most responsive genes per pathway
+
+```{r}
+PathwayActivity_counts <- progeny(Normalised_counts_matrix, scale=TRUE, organism="Human", top = 100)
+Activity_counts <- as.vector(PathwayActivity_counts)
+```
+
+results in a heatmap
+```{r}
+paletteLength <- 100
+myColor <- colorRampPalette(c("darkblue", "whitesmoke","indianred"))(paletteLength)
+progenyBreaks <- c(seq(min(Activity_counts), 0, 
+    length.out=ceiling(paletteLength/2) + 1),
+    seq(max(Activity_counts)/paletteLength, 
+    max(Activity_counts), 
+    length.out=floor(paletteLength/2)))
+progeny_hmap <- pheatmap(t(PathwayActivity_counts),fontsize=14, 
+    fontsize_row = 10, fontsize_col = 10, 
+    color=myColor, breaks = progenyBreaks, 
+    main = "PROGENy (100)", angle_col = 45,
+    treeheight_col = 0,  border_color = NA)
+```
+
+Enrichment analysis using a competitive permutation approach to assess the significance of the pathway activity. 
+Output a Normalized Enrichment Score (NES) for each pathway.
+PROGENy pathway signatures were applied to differential expression t-values from limma. Based on an empirical null distribution generated through 10,000 times gene-wise permutation and the percentile corresponding to the observed value, the significance score was derived.
+z score: distance from mean of the distribution measured in standard deviations
+
+## AT 4 hour vs basal
+```{r}
+PathwayActivity_zscore_AT4h <- progeny(ttop_B_vs_AT.4h_matrix, 
+    scale=TRUE, organism="Human", top = 100, perm = 10000, z_scores = TRUE) %>%
+    t()
+colnames(PathwayActivity_zscore_AT4h) <- "NES"
+
+```
+
+```{r}
+PathwayActivity_zscore_AT4h_df <- as.data.frame(PathwayActivity_zscore_AT4h) %>% 
+    rownames_to_column(var = "Pathway") %>%
+    dplyr::arrange(NES) %>%
+    dplyr::mutate(Pathway = factor(Pathway))
+
+ggplot(PathwayActivity_zscore_AT4h_df,aes(x = reorder(Pathway, NES), y = NES)) + 
+    ggtitle("AT 4 hour versus basal") +
+    geom_bar(aes(fill = NES), stat = "identity") +
+    scale_fill_gradient2(low = "darkblue", high = "indianred", 
+        mid = "whitesmoke", midpoint = 0) + 
+    theme_minimal() +
+    theme(axis.title = element_text(face = "bold", size = 12),
+        axis.text.x = 
+            element_text(angle = 45, hjust = 1, size =10, face= "bold"),
+        axis.text.y = element_text(size =10, face= "bold"),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+    xlab("Pathways")
+```
+
+```{r ProgenyScatter_1_AT4.vs.B, message=FALSE, warning=FALSE}
+prog_matrix <- getModel("Human", top=100) %>% 
+    as.data.frame()  %>%
+    tibble::rownames_to_column("GeneID")
+
+ttop_B_vs_AT.4h_df <- ttop_B_vs_AT.4h_matrix %>% 
+    as.data.frame() %>% 
+    tibble::rownames_to_column("GeneID")
+
+scat_plots <- progeny::progenyScatter(df = ttop_B_vs_AT.4h_df, 
+    weight_matrix = prog_matrix, 
+    statName = "t_values", verbose = FALSE)
+```
+
+```{r ProgenyScatter_2_AT4.vs.B, dpi=300}
+plot(scat_plots[[1]]$`NFkB`) 
+plot(scat_plots[[1]]$`TNFa`)
+```
+
+```{R}
+library(ggplotify)
+
+pathway_NFkB = as.ggplot(function() plot(scat_plots[[1]]$`NFkB`))
+pathway_TNFa = as.ggplot(function() plot(scat_plots[[1]]$`TNFa`))
+
+pathways_comb = ggarrange(pathway_NFkB, pathway_TNFa,
+          ncol=2, nrow=1)
+print(pathways_comb)
+
+ggsave(file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Figures/BvsAT4h_pathwayResponsiveGenes.pdf"),
+       plot = pathways_comb,
+       width = 11,
+       height = 5,
+       units = "in",
+       device = "pdf")
+```
+
+```{r ProgenyCARNIVAL_AT4.vs.B}
+PathwayActivity_CARNIVALinput_B_vs_AT.4h <- progeny(ttop_B_vs_AT.4h_matrix, 
+    scale=TRUE, organism="Human", top = 100, perm = 10000, z_scores = FALSE) %>%
+    t () %>% 
+    as.data.frame() %>% 
+    tibble::rownames_to_column(var = "Pathway") 
+colnames(PathwayActivity_CARNIVALinput_B_vs_AT.4h)[2] <- "score"
+write_csv(PathwayActivity_CARNIVALinput_B_vs_AT.4h, 
+    file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/progeny/PathwayActivity_CARNIVALinput_B_vs_AT.4h.csv"))
+```
+
+## RT 4 hour versus basal
+```{r}
+PathwayActivity_zscore_RT4h <- progeny(ttop_B_vs_RT.4h_matrix, 
+    scale=TRUE, organism="Human", top = 100, perm = 10000, z_scores = TRUE) %>%
+    t()
+colnames(PathwayActivity_zscore_RT4h) <- "NES"
+```
+
+```{r}
+PathwayActivity_zscore_RT4h_df <- as.data.frame(PathwayActivity_zscore_RT4h) %>% 
+    rownames_to_column(var = "Pathway") %>%
+    dplyr::arrange(NES) %>%
+    dplyr::mutate(Pathway = factor(Pathway))
+
+ggplot(PathwayActivity_zscore_RT4h_df,aes(x = reorder(Pathway, NES), y = NES)) + 
+    ggtitle("RT 4 hour versus basal") +
+    geom_bar(aes(fill = NES), stat = "identity") +
+    scale_fill_gradient2(low = "darkblue", high = "indianred", 
+        mid = "whitesmoke", midpoint = 0) + 
+    theme_minimal() +
+    theme(axis.title = element_text(face = "bold", size = 12),
+        axis.text.x = 
+            element_text(angle = 45, hjust = 1, size =10, face= "bold"),
+        axis.text.y = element_text(size =10, face= "bold"),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+    xlab("Pathways")
+```
+
+```{r ProgenyScatter_1_RT4.vs.B, message=FALSE, warning=FALSE}
+prog_matrix <- getModel("Human", top=100) %>% 
+    as.data.frame()  %>%
+    tibble::rownames_to_column("GeneID")
+
+ttop_B_vs_RT.4h_df <- ttop_B_vs_RT.4h_matrix %>% 
+    as.data.frame() %>% 
+    tibble::rownames_to_column("GeneID")
+
+scat_plots <- progeny::progenyScatter(df = ttop_B_vs_RT.4h_df, 
+    weight_matrix = prog_matrix, 
+    statName = "t_values", verbose = FALSE)
+```
+
+```{r ProgenyScatter_2_RT4.vs.B, dpi=300}
+plot(scat_plots[[1]]$`NFkB`) 
+plot(scat_plots[[1]]$`TNFa`)
+plot(scat_plots[[1]]$`MAPK`) 
+```
+
+```{R}
+library(ggplotify)
+
+pathway_NFkB = as.ggplot(function() plot(scat_plots[[1]]$`NFkB`))
+pathway_TNFa = as.ggplot(function() plot(scat_plots[[1]]$`TNFa`))
+
+pathways_comb = ggarrange(pathway_NFkB, pathway_TNFa,
+          ncol=2, nrow=1)
+print(pathways_comb)
+
+ggsave(file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/figures/BvsRT4h_pathwayResponsiveGenes.pdf"),
+       plot = pathways_comb,
+       width = 11,
+       height = 5,
+       units = "in",
+       device = "pdf")
+```
+
+```{r ProgenyCARNIVAL_RT4.vs.B}
+PathwayActivity_CARNIVALinput_B_vs_RT.4h <- progeny(ttop_B_vs_RT.4h_matrix, 
+    scale=TRUE, organism="Human", top = 100, perm = 10000, z_scores = FALSE) %>%
+    t () %>% 
+    as.data.frame() %>% 
+    tibble::rownames_to_column(var = "Pathway") 
+colnames(PathwayActivity_CARNIVALinput_B_vs_RT.4h)[2] <- "score"
+write_csv(PathwayActivity_CARNIVALinput_B_vs_RT.4h, 
+    file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/progeny/PathwayActivity_CARNIVALinput_B_vs_RT.4h.csv"))
+```
+
+## Exercise-specific pathway response
+Bar graph of the exercise responsive pathways, comparing the RE and AE responses
+
+First, we  compare the NES values between the aerobic and resistance exercise datasets
+for the TFs that specifically target the RPS6KB1 gene. The TFs that target RPS6KB1
+were identified using the OmniPath TF-target network.
+```{r}
+# AT 4h pathway responses
+pathwayScore_AT4h = PathwayActivity_zscore_AT4h
+
+# RT 4h pathway responses
+pathwayScore_RT4h = PathwayActivity_zscore_RT4h
+
+exerciseResponsivePathways = cbind(pathwayScore_AT4h, pathwayScore_RT4h)
+colnames(exerciseResponsivePathways) = c("AT_NES", "RT_NES")
+```
+
+```{r}
+exerciseResponsivePathways_df = as.data.frame(exerciseResponsivePathways)
+exerciseResponsivePathways_df$pathways = rownames(exerciseResponsivePathways_df)
+
+# Reshape the data into long format
+long_data_pathways <- pivot_longer(
+  exerciseResponsivePathways_df,
+  cols = -pathways,  # Exclude the 'TF' column from reshaping
+  names_to = "Condition",
+  values_to = "NES"
+)
+
+
+long_data_pathways <- long_data_pathways %>%
+  mutate(pathways = factor(pathways, 
+                           levels = long_data_pathways %>%
+                                     filter(Condition == "RT_NES") %>%
+                                     arrange(NES) %>%
+                                     pull(pathways)))  # Reorder pathways based on AT_NES
+
+# Create the bar graph
+exResponsivePathways_REvsAE_NES = ggplot(long_data_pathways, aes(x = pathways, y = NES, fill = Condition)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  labs(
+    # title = "NES Values for RPS6KB1-Specific TFs",
+    x = "Pathways",
+    y = "Normalized Enrichment Score",
+    fill = "Condition"
+  ) +
+  scale_fill_manual(
+    values = c("AT_NES" = "darkblue", "RT_NES" = "indianred"),  # Custom fill colors
+    # labels = c("AE", "RE")  # Custom legend labels
+    labels = c("Aerobic", "Resistance")  # Custom legend labels
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5),
+     legend.position = c(0.01, 0.99),  # Position legend in the upper left corner
+    legend.justification = c(0, 1)  # Align legend box to the top left corner
+  ) +
+  guides(
+    fill = guide_legend(title = NULL, ncol = 1)  # Remove legend title and split into 1 column
+  )
+print(exResponsivePathways_REvsAE_NES)
+
+ggsave(file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Figures/exerciseResponsivePathways_ReVsAe.pdf"),
+       plot = exResponsivePathways_REvsAE_NES,
+       width = 26.8/2,
+       height = 6.5,
+       units = "cm",
+       device = "pdf")
+```
+
+### 4: Transcription Factor activity (DoRothEA)
+Here we estimate transcription factor activity from transcriptomics data using **DoRothEA**.
+DoRothEA is a comprehensive resource containing a curated collection of TFs and their transcriptional targets. 
+The set of genes regulated by a specific TF is known as regulon. 
+Each TF-target interaction is defined by a confidence level based on the volume of supporting evidence. 
+The confidence levels range from A (highest confidence) to E (lowest confidence)
+```{r}
+library(ggrepel)
+```
+
+Dorothea input files
+```{r Dorothea inputs}
+Normalised_counts_dorothea <- read_csv(file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Data/count_df_vsn.csv"))
+Experimental_design_dorothea <- read_csv(file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Data/targets.csv"))
+ttop_B_vs_AT.4h_dorothea <- read_csv(file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Data/ttop_B_vs_AT.4h.csv"))
+ttop_B_vs_RT.4h_dorothea <- read_csv(file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Data/ttop_B_vs_RT.4h.csv"))
+```
+
+Modify file formats
+```{r Dorothea file modification, message=FALSE}
+#replace NA entries with 0
+Normalised_counts_matrix_dorothea <- Normalised_counts_dorothea %>% 
+    dplyr::mutate_if(~ any(is.na(.x)),~ if_else(is.na(.x),0,.x)) %>% 
+    tibble::column_to_rownames(var = "gene") %>%
+    as.matrix()
+
+ttop_B_vs_AT.4h_dorothea_matrix <- ttop_B_vs_AT.4h_dorothea %>% 
+    dplyr::select(ID, t) %>% 
+    dplyr::filter(!is.na(t)) %>% 
+    column_to_rownames(var = "ID") %>%
+    as.matrix()
+
+ttop_B_vs_RT.4h_dorothea_matrix <- ttop_B_vs_RT.4h_dorothea %>% 
+    dplyr::select(ID, t) %>% 
+    dplyr::filter(!is.na(t)) %>% 
+    column_to_rownames(var = "ID") %>%
+    as.matrix()
+```
+
+## Transcription Factor activity with DoRothEA
+We estimate the transcription factor (TF) activity using the **DoRothEA** R package. 
+We select interactions with confidence level A, B, and C. 
+```{r loadDorothea, message=FALSE}
+## We load Dorothea Regulons
+data(dorothea_hs, package = "dorothea")
+regulons <- dorothea_hs %>%
+  dplyr::filter(confidence %in% c("A","B","C","D","E"))
+```
+
+Note that for **DoRothEA**, we proceed the other way around than for **PROGENy**. 
+In **PROGENy**, we calculate the pathway_activity_counts directly, which is feed into heatmap().
+We have many TFs, so we cannot clearly visualize all of them in the same heatmap. 
+That is why we first compute a TF activity enrichment analysis using statistics from the differential expression analysis. This allows us to select the TFs whose activity varies with the conditions under study. 
+
+**DoRothEA** is used together with VIPER, where TF activities are computed based on the mRNA expression levels of its targets. We therefore can consider TF activity as a proxy of a given transcriptional state.
+
+It is important to set the parameter `eset.filter` to `FALSE`. In this case,
+we set the minimum size of regulons to five (`minsize`).
+
+@param eset ExpressionSet object or Numeric matrix containing the expression data or gene expression signatures, with samples in columns and genes in rows.
+@param minsize Integer indicating the minimum number of targets allowed per regulon
+@param nes Logical, whether the enrichment score reported should be normalized
+Function is a wrapper for viper class using DoRothEA regulons.
+```{r ViperStat, message=FALSE}
+tf_activities_stat_B_vs_AT.4h <- dorothea::run_viper(ttop_B_vs_AT.4h_dorothea_matrix, regulons,
+    options =  list(minsize = 3, eset.filter = FALSE, 
+    cores = 1, verbose = FALSE, nes = TRUE))
+
+tf_activities_stat_B_vs_RT.4h <- dorothea::run_viper(ttop_B_vs_RT.4h_dorothea_matrix, regulons,
+    options =  list(minsize = 3, eset.filter = FALSE, 
+    cores = 1, verbose = FALSE, nes = TRUE))
+```
+
+## AT 4 hour versus basal
+We now display the top 25 normalized enrichment scores (NES) for the TFs in a 
+bar plot.
+```{r ViperBarplot AT 4h vs basal, message=FALSE, dpi=300}
+tf_activities_stat_top25_B_vs_AT.4h <- tf_activities_stat_B_vs_AT.4h %>%
+    as.data.frame() %>% 
+    rownames_to_column(var = "GeneID") %>%
+    dplyr::rename(NES = "t") %>%
+    dplyr::top_n(25, wt = abs(NES)) %>% #top 25, ordered by absolute values of NES, select both - && +ve
+    dplyr::arrange(NES) %>% 
+    dplyr::mutate(GeneID = factor(GeneID))
+
+ggplot(tf_activities_stat_top25_B_vs_AT.4h, aes(x = reorder(GeneID, NES), y = NES)) + 
+    geom_bar(aes(fill = NES), stat = "identity") +
+    scale_fill_gradient2(low = "darkblue", high = "indianred", 
+        mid = "whitesmoke", midpoint = 0) + 
+    theme_minimal() +
+    theme(axis.title = element_text(face = "bold", size = 12),
+        axis.text.x = 
+            element_text(angle = 45, hjust = 1, size =10, face= "bold"),
+        axis.text.y = element_text(size =10, face= "bold"),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+    xlab("Transcription Factors")
+```
+
+To interpret the results, we can use a volcano plot to look at the expression of targets of one of the 
+most de(/up)regulated TFs, such as TCF4 
+
+*Volcano plot*: blue = down regulated genes, red = upregulated genes, logFC = log(fold change). Within the volcano plot, the most up/down regulated genes are towards the right/left, respectively. And the most statistically significant genes are towards the top
+```{r Volcano RT 4h vs basal, warning=FALSE, dpi=300}
+targets_NFKB1 <- regulons$target[regulons$tf == "BHLHE40"] #targets of "TCF4"
+
+#'This function is designed to generate a stylish and practical volcano plot to visual the result of a differential analysis, with simple required inputs.
+#'The plot features two bi-symptotic curves to give a visual support for p-value and fold change threshold.'
+# Parameters of volcano_nice():
+#'@param FCIndex the column number corresponding to the foldchanges
+#'@param pValIndex the column number corresponding to the p-values
+#'@param IDIndex the column number corresponding to the identifiers
+#'@param straight a boolean argument to indicate if the plot should feature bi-symptotic curves 
+#'or straight lines to visualise the thresholds. In this case, we use bi-symptotic curves. 
+#'@param nlabels number of labels to display
+
+volcano_nice(as.data.frame(ttop_B_vs_AT.4h_dorothea[ttop_B_vs_AT.4h_dorothea$ID %in% targets_NFKB1,]), 
+    FCIndex = 2, pValIndex = 5, IDIndex = 1,nlabels = 20, label = TRUE, 
+    straight = FALSE,
+    plotTitle = "BHLHE40") 
+```
+The TF activity enrichment results provided by **Viper** are used as an input in the **CARNIVAL** network inference. 
+**CARNIVAL** tries to infer the most likely upstream signaling events leading to the current TF activity results. 
+
+```{R} 
+# Manuscript figure
+TfActivities_AT4h = ggplot(tf_activities_stat_top25_B_vs_AT.4h, aes(x = reorder(GeneID, NES), y = NES)) + 
+    ggtitle("Baseline versus 4-hours post aerobic exercise") +
+    geom_bar(aes(fill = NES), stat = "identity") +
+    scale_fill_gradient2(low = "darkblue", high = "indianred", 
+        mid = "whitesmoke", midpoint = 0) + 
+    # theme_minimal() +
+    theme_bw() +
+    theme(legend.title = element_blank()) +
+    theme(axis.title = element_text(face = "bold", size = 12),
+        axis.text.x =
+            element_text(angle = 45, hjust = 1, size =8, face= "bold"),
+        axis.text.y = element_text(size =10, face= "bold")) +
+    ylab("Normalized enrichment \nscore") +
+    xlab("Transcription Factor")
+
+ggsave(file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Figures/TfActivities_baselineVsAT4h.pdf"),
+       plot = TfActivities_AT4h,
+       width = 7.5,
+       height = 3,
+       units = "in",
+       device = "pdf")
+```
+
+To interpret the results, we can look at the expression of targets of the most deregulated TFs 
+```{r Volcano RT 4h vs basal, warning=FALSE, dpi=300}
+targets_BATF <- regulons$target[regulons$tf == "BATF"]
+TF_BATF_AT4h = volcano_nice(as.data.frame(ttop_B_vs_AT.4h_dorothea[ttop_B_vs_AT.4h_dorothea$ID %in% targets_BATF,]), 
+    FCIndex = 2, pValIndex = 5, IDIndex = 1,nlabels = 10, label = TRUE, 
+    straight = FALSE,
+    plotTitle = "BATF") 
+
+targets_DLX4 <- regulons$target[regulons$tf == "DLX4"]
+TF_DLX4_AT4h = volcano_nice(as.data.frame(ttop_B_vs_AT.4h_dorothea[ttop_B_vs_AT.4h_dorothea$ID %in% targets_DLX4,]), 
+    FCIndex = 2, pValIndex = 5, IDIndex = 1,nlabels = 10, label = TRUE, 
+    straight = FALSE,
+    plotTitle = "DLX4") 
+
+targets_ELF1 <- regulons$target[regulons$tf == "ELF1"]
+TF_ELF1_AT4h = volcano_nice(as.data.frame(ttop_B_vs_AT.4h_dorothea[ttop_B_vs_AT.4h_dorothea$ID %in% targets_ELF1,]),
+    FCIndex = 2, pValIndex = 5, IDIndex = 1,nlabels = 10, label = TRUE,
+    straight = FALSE,
+    plotTitle = "ELF1")
+
+targets_HIF1A <- regulons$target[regulons$tf == "HIF1A"]
+TF_HIF1A_AT4h = volcano_nice(as.data.frame(ttop_B_vs_RT.4h_dorothea[ttop_B_vs_RT.4h_dorothea$ID %in% targets_HIF1A,]),
+    FCIndex = 2, pValIndex = 5, IDIndex = 1,nlabels = 10, label = TRUE,
+    straight = FALSE,
+    plotTitle = "HIF1A")
+
+targets_SNAI1  <- regulons$target[regulons$tf == "SNAI1"]
+TF_SNAI1_AT4h = volcano_nice(as.data.frame(ttop_B_vs_AT.4h_dorothea[ttop_B_vs_AT.4h_dorothea$ID %in% targets_SNAI1,]),
+    FCIndex = 2, pValIndex = 5, IDIndex = 1,nlabels = 10, label = TRUE,
+    straight = FALSE,
+    plotTitle = "SNAI1")
+
+TFs_AT4h = ggarrange(TF_BATF_AT4h, TF_DLX4_AT4h, TF_ELF1_AT4h, 
+                     TF_HIF1A_AT4h, TF_SNAI1_AT4h,
+                     ncol = 2, nrow = 3,
+                           labels = c("A.", "B.", "C.", "D.", "E."))
+print(TFs_AT4h)
+
+ggsave(file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Figures/TF_AT4h_volcanoes.pdf"),
+       plot = TFs_AT4h,
+       width = 8.5,
+       height = 11,
+       units = "in",
+       device = "pdf")
+```
+
+```{r WriteCsv AT 4h vs basal}
+tf_activities_CARNIVALinput_AT.4h_vs_b<- tf_activities_stat_B_vs_AT.4h %>%
+    as.data.frame() %>% 
+    tibble::rownames_to_column(var = "TF") 
+write_csv(tf_activities_CARNIVALinput_AT.4h_vs_b, file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/dorothea/TFActivity_CARNIVALinput_AT4h_vs_B.csv"))
+```
+
+## RT 4 hour versus basal
+```{r ViperBarplot RT 4h vs basal, message=FALSE, dpi=300}
+tf_activities_stat_top25_B_vs_RT.4h <- tf_activities_stat_B_vs_RT.4h %>%
+    as.data.frame() %>% 
+    rownames_to_column(var = "GeneID") %>%
+    dplyr::rename(NES = "t") %>%
+    dplyr::top_n(25, wt = abs(NES)) %>%
+    dplyr::arrange(NES) %>% 
+    dplyr::mutate(GeneID = factor(GeneID))
+
+ggplot(tf_activities_stat_top25_B_vs_RT.4h, aes(x = reorder(GeneID, NES), y = NES)) + 
+    ggtitle("RT 4 hour versus basal: TF activity") +
+    geom_bar(aes(fill = NES), stat = "identity") +
+    scale_fill_gradient2(low = "darkblue", high = "indianred", 
+        mid = "whitesmoke", midpoint = 0) + 
+    theme_minimal() +
+    theme(axis.title = element_text(face = "bold", size = 12),
+        axis.text.x = 
+            element_text(angle = 45, hjust = 1, size =10, face= "bold"),
+        axis.text.y = element_text(size =10, face= "bold"),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+    xlab("Transcription Factors")
+```
+
+```{R} 
+# Manuscript figure
+TfActivities_RT4h = ggplot(tf_activities_stat_top25_B_vs_RT.4h, aes(x = reorder(GeneID, NES), y = NES)) + 
+    ggtitle("Baseline versus 4-hours post resistance exercise") +
+    geom_bar(aes(fill = NES), stat = "identity") +
+    scale_fill_gradient2(low = "darkblue", high = "indianred", 
+        mid = "whitesmoke", midpoint = 0) + 
+    # theme_minimal() +
+    theme_bw() +
+    theme(legend.title = element_blank()) +
+    theme(axis.title = element_text(face = "bold", size = 12),
+        axis.text.x =
+            element_text(angle = 45, hjust = 1, size =8, face= "bold"),
+        axis.text.y = element_text(size =10, face= "bold")) +
+        # panel.grid.major = element_blank()) +
+        # panel.grid.minor = element_blank()) +
+    ylab("Normalized enrichment \nscore") +
+    xlab("Transcription Factor")
+
+ggsave(file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Figures/TfActivities_baselineVsRT4h.pdf"),
+       plot = TfActivities_RT4h,
+       width = 7.5,
+       height = 3,
+       units = "in",
+       device = "pdf")
+```
+
+To interpret the results, we can look at the expression of targets of the most deregulated TFs 
+```{r Volcano RT 4h vs basal, warning=FALSE, dpi=300}
+targets_BATF <- regulons$target[regulons$tf == "BATF"]
+TF_BATF_RT4h = volcano_nice(as.data.frame(ttop_B_vs_RT.4h_dorothea[ttop_B_vs_RT.4h_dorothea$ID %in% targets_BATF,]), 
+    FCIndex = 2, pValIndex = 5, IDIndex = 1,nlabels = 10, label = TRUE, 
+    straight = FALSE,
+    plotTitle = "BATF") 
+
+targets_CEBPA <- regulons$target[regulons$tf == "CEBPA"]
+TF_CEBPA_RT4h = volcano_nice(as.data.frame(ttop_B_vs_RT.4h_dorothea[ttop_B_vs_RT.4h_dorothea$ID %in% targets_CEBPA,]), 
+    FCIndex = 2, pValIndex = 5, IDIndex = 1,nlabels = 10, label = TRUE, 
+    straight = FALSE,
+    plotTitle = "CEBPA") 
+
+targets_ELF1 <- regulons$target[regulons$tf == "ELF1"]
+TF_ELF1_RT4h = volcano_nice(as.data.frame(ttop_B_vs_RT.4h_dorothea[ttop_B_vs_RT.4h_dorothea$ID %in% targets_ELF1,]), 
+    FCIndex = 2, pValIndex = 5, IDIndex = 1,nlabels = 10, label = TRUE, 
+    straight = FALSE,
+    plotTitle = "ELF1") 
+
+targets_HIF1A <- regulons$target[regulons$tf == "HIF1A"]
+TF_HIF1A_RT4h = volcano_nice(as.data.frame(ttop_B_vs_RT.4h_dorothea[ttop_B_vs_RT.4h_dorothea$ID %in% targets_HIF1A,]),
+    FCIndex = 2, pValIndex = 5, IDIndex = 1,nlabels = 10, label = TRUE,
+    straight = FALSE,
+    plotTitle = "HIF1A")
+
+targets_MEF2A  <- regulons$target[regulons$tf == "MEF2A"]
+TF_MEF2A_RT4h = volcano_nice(as.data.frame(ttop_B_vs_RT.4h_dorothea[ttop_B_vs_RT.4h_dorothea$ID %in% targets_MEF2A,]),
+    FCIndex = 2, pValIndex = 5, IDIndex = 1,nlabels = 10, label = TRUE,
+    straight = FALSE,
+    plotTitle = "MEF2A")
+
+targets_SNAI1  <- regulons$target[regulons$tf == "SNAI1"]
+TF_SNAI1_RT4h = volcano_nice(as.data.frame(ttop_B_vs_RT.4h_dorothea[ttop_B_vs_RT.4h_dorothea$ID %in% targets_SNAI1,]),
+    FCIndex = 2, pValIndex = 5, IDIndex = 1,nlabels = 10, label = TRUE,
+    straight = FALSE,
+    plotTitle = "SNAI1")
+
+TFs_RT4h = ggarrange(TF_BATF_RT4h, TF_CEBPA_RT4h, TF_ELF1_RT4h, 
+                     TF_HIF1A_RT4h, TF_MEF2A_RT4h, TF_SNAI1_RT4h,
+                     ncol = 2, nrow = 3,
+                           labels = c("A.", "B.", "C.", "D.", "E.", "F."))
+print(TFs_RT4h)
+
+ggsave(file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Figures/TF_RT4h_volcanoes.pdf"),
+       plot = TFs_RT4h,
+       width = 8.5,
+       height = 11,
+       units = "in",
+       device = "pdf")
+```
+The TF activity enrichment results provided by **Viper** are used as an input
+in the **CARNIVAL** method. **CARNIVAL** tries to infer the most likely 
+upstream signaling events leading to the current TF activity results. 
+
+```{r WriteCsv RT 4h vs basal}
+tf_activities_CARNIVALinput_RT.4h_vs_b<- tf_activities_stat_B_vs_RT.4h %>%
+    as.data.frame() %>% 
+    tibble::rownames_to_column(var = "TF") 
+write_csv(tf_activities_CARNIVALinput_RT.4h_vs_b, file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/dorothea/TFActivity_CARNIVALinput_RT4h_vs_B.csv"))
+```
+
+We now compute TF activities per sample (with the replicates) using the 
+normalised counts. We display the results of the previous 25 TFs in a Heatmap.
+
+```{r ViperCounts AT 4h vs basal, message=FALSE}
+#The normalizing of a dataset using the mean value and standard deviation is known as scaling.
+#Used mainly for data not measured in the same way.
+tf_activities_counts <- 
+    dorothea::run_viper(Normalised_counts_matrix_dorothea, regulons,
+    options =  list(minsize = 5, eset.filter = FALSE, 
+    cores = 1, verbose = FALSE, method = c("scale")))
+
+#filter based on top 25 deregulated TFs from last step
+tf_activities_counts_filter <- tf_activities_counts %>% 
+    as.data.frame() %>% 
+    rownames_to_column(var = "GeneID") %>%
+    dplyr::filter(GeneID %in% tf_activities_stat_top25_B_vs_AT.4h$GeneID) %>%
+    column_to_rownames(var = "GeneID") %>%
+    as.matrix()
+
+tf_activities_vector <- as.vector(tf_activities_counts_filter)
+```
+
+```{r ViperHeatMap AT 4h vs basal}
+paletteLength <- 100
+myColor <- 
+    colorRampPalette(c("darkblue", "whitesmoke","indianred"))(paletteLength)
+
+dorotheaBreaks <- c(seq(min(tf_activities_vector), 0, 
+    length.out=ceiling(paletteLength/2) + 1),
+    seq(max(tf_activities_vector)/paletteLength, 
+    max(tf_activities_vector), 
+    length.out=floor(paletteLength/2)))
+
+dorothea_hmap <- pheatmap(tf_activities_counts_filter,
+    fontsize=14, fontsize_row = 8, fontsize_col = 8, 
+    color=myColor, breaks = dorotheaBreaks,
+    main = "Dorothea ABC: AT 4h vs basal", angle_col = 45,
+    border_color = NA)
+```
+
+```{r ViperCounts RT 4h vs basal, message=FALSE}
+tf_activities_counts_filter <- tf_activities_counts %>% 
+    as.data.frame() %>% 
+    rownames_to_column(var = "GeneID") %>%
+    dplyr::filter(GeneID %in% tf_activities_stat_top25_B_vs_RT.4h$GeneID) %>%
+    column_to_rownames(var = "GeneID") %>%
+    as.matrix()
+
+tf_activities_vector <- as.vector(tf_activities_counts_filter)
+```
+
+```{r ViperHeatMap RT 4h vs basal}
+paletteLength <- 100
+myColor <- 
+    colorRampPalette(c("darkblue", "whitesmoke","indianred"))(paletteLength)
+
+dorotheaBreaks <- c(seq(min(tf_activities_vector), 0, 
+    length.out=ceiling(paletteLength/2) + 1),
+    seq(max(tf_activities_vector)/paletteLength, 
+    max(tf_activities_vector), 
+    length.out=floor(paletteLength/2)))
+dorothea_hmap <- pheatmap(tf_activities_counts_filter,
+    fontsize=14, fontsize_row = 8, fontsize_col = 8, 
+    color=myColor, breaks = dorotheaBreaks,
+    main = "Dorothea ABC: RT 4h vs basal", angle_col = 45,
+    treeheight_col = 0,  border_color = NA)
+```
+
+We now compare the NES values between the aerobic and resistance exercise datasets
+for the TFs that specifically target the RPS6KB1 gene. The TFs that target RPS6KB1
+were identified using the OmniPath TF-target network.
+```{r}
+# AT 4h TFs
+tfList_AT4h = tf_activities_CARNIVALinput_AT.4h_vs_b
+rownames(tfList_AT4h) <- tfList_AT4h$TF
+tfList_AT4h$TF <- NULL
+
+# RT 4h TFs
+tfList_RT4h = tf_activities_CARNIVALinput_RT.4h_vs_b
+rownames(tfList_RT4h) <- tfList_RT4h$TF
+tfList_RT4h$TF <- NULL
+
+TFsTargetting_RPS6KB1  = c("MEF2A", "EP300", "SNAI1", "UBTF", "DLX4", "BATF", "E2F1",
+                           "CEBPA", "NRF1", "FOXA1","E2F2", "MYC", "ELF1", "ESR1", 
+                           "CTCF", "GATA3", "SNAPC4", "YBX1", "HIF1A")
+
+RPS6KB1_specificTF_AT4h = tfList_AT4h[rownames(tfList_AT4h) %in% TFsTargetting_RPS6KB1, , drop=FALSE]
+RPS6KB1_specificTF_RT4h = tfList_RT4h[rownames(tfList_RT4h) %in% TFsTargetting_RPS6KB1, , drop=FALSE]
+
+RPS6KB1_specificTF = cbind(RPS6KB1_specificTF_AT4h, RPS6KB1_specificTF_RT4h)
+colnames(RPS6KB1_specificTF) = c("AT_NES", "RT_NES")
+
+```
+
+## RPS6KB1 specific TF response
+Bar graph of the RPS6KB1-specific TFs comparing the RE and AE responses
+```{r}
+RPS6KB1_specificTF$TF <- rownames(RPS6KB1_specificTF)
+
+# Reshape the data into long format
+long_data <- pivot_longer(
+  RPS6KB1_specificTF,
+  cols = -TF,  # Exclude the 'TF' column from reshaping
+  names_to = "Condition",
+  values_to = "NES"
+)
+
+# Create the bar graph
+rps6kb1_TFs_REvsAE_NES = ggplot(long_data, aes(x = TF, y = NES, fill = Condition)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  labs(
+    # title = "NES Values for RPS6KB1-Specific TFs",
+    x = "Transcription Factors",
+    y = "Normalized Enrichment Score",
+    fill = "Condition"
+  ) +
+  scale_fill_manual(
+    values = c("AT_NES" = "darkblue", "RT_NES" = "indianred"),  # Custom fill colors
+    # labels = c("AE", "RE")  # Custom legend labels
+    labels = (c("Aerobic", "Resistance"))
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5),
+    legend.position = c(0.99, 0.99),  # Position legend in the upper right corner
+    legend.justification = c(1, 1)  # Align legend box to the top right corner
+  ) +
+  guides(
+    fill = guide_legend(title = NULL, ncol = 1)  # Remove legend title and split into 1 column
+  )
+print(rps6kb1_TFs_REvsAE_NES)
+
+ggsave(file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Figures/RPS6KB1SpecificTFs_ReVsAe.pdf"),
+       plot = rps6kb1_TFs_REvsAE_NES,
+       width = 7.5,
+       height = 3,
+       units = "in",
+       device = "pdf")
+
+```
+
+### 5: Evaluation of RPS6KB1 transcript changes to exercise
+```{r}
+Rps6kb1counts = log2(count_df_vsn["RPS6KB1",])
+Rps6kb1counts_conditions = c((colnames(Rps6kb1counts)))
+Rps6kb1Data = data.frame(Condition = Rps6kb1counts_conditions, RPS6KB1 = t(Rps6kb1counts), stringsAsFactors = FALSE)
+
+# Use regex to extract Condition and Participant
+Rps6kb1Data <- Rps6kb1Data %>%
+  mutate(
+    Participant = stringr::str_extract(Condition, "P\\d+"),  # Extract "P1", "P2", etc.
+    Condition = stringr::str_replace(Condition, "\\.P\\d+", "")  # Remove participant ID from Condition
+  )
+
+# Filter for Basal, AT.4h, and RT.4h only
+Rps6kb1Data_filtered <- Rps6kb1Data %>%
+  filter(Condition %in% c("basal", "AT.4h", "RT.4h"))
+
+# Convert Condition to a factor with correct ordering
+Rps6kb1Data_filtered$Condition <- factor(Rps6kb1Data_filtered$Condition, levels = c("basal", "AT.4h", "RT.4h"))
+
+# Capitalize first letter for plot labels
+Rps6kb1Data_filtered$Condition <- recode(Rps6kb1Data_filtered$Condition, 
+                                "basal" = "Basal", 
+                                "AT.4h" = "AT.4h", 
+                                "RT.4h" = "RT.4h")
+
+# Create the plot with lines linking the participant data points
+rps6kb1Expression = ggplot(Rps6kb1Data_filtered, aes(x = Condition, y = RPS6KB1)) +
+  geom_boxplot(aes(fill = Condition), alpha = 0.15, outlier.shape = NA) +  # Boxplot for distribution by Condition
+  geom_jitter(aes(colour = Participant), width = 0.1, size = 3, alpha = 0.7) +  # Individual data points coloured by Participant
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 4, fill = "white") +  # Mean point
+  scale_x_discrete(
+    labels = c(
+      "Basal" = "Baseline",
+      "AT.4h" = "Aerobic exercise:\n4 hours post",
+      "RT.4h" = "Resistance exercise:\n4 hours post"
+    )
+  ) +
+  scale_fill_manual(values = c("Basal" = "grey70", "AT.4h" = "darkblue", "RT.4h" = "indianred"), guide = 'none') +  # Muted fill colours
+  theme_bw() +
+  labs(
+    title = NULL,
+    x = "Condition",
+    y = expression("Normalized " ~ italic(RPS6KB1) ~ " counts")  # Italicized RPS6KB1 in label
+  ) +
+    theme(
+      legend.position = "right",
+      axis.title.x = element_text(margin = margin(t = 5, r = 0, b = 0, l = 0))  # Adds space between x-axis label and tick labels
+    )
+
+print(rps6kb1Expression)
+
+ggsave(file = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/Figures/RPS6KB1expression_basalRtAt.pdf"),
+       plot = rps6kb1Expression,
+       width = 6,
+       height = 3,
+       units = "in",
+       device = "pdf")
+```
+
+### 6: CARNIVAL network inference
+```{r, message=FALSE}
+library(OmnipathR)
+
+## Load support functions
+source(file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Support/assignPROGENyScores.r"))
+source(file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Support/generateTFList.r"))
+```
+
+Inputting files for carnival: Baseline vs RT4h
+```{r loadInput, message=FALSE}
+# Resistance exercise
+tf_activities_RE <- tf_activities_CARNIVALinput_RT.4h_vs_b
+PathwayActivity_RE <- PathwayActivity_CARNIVALinput_B_vs_RT.4h
+
+# Aerobic exercise
+tf_activities_AE <- tf_activities_CARNIVALinput_AT.4h_vs_b
+PathwayActivity_AE <- PathwayActivity_CARNIVALinput_B_vs_AT.4h
+```
+
+## Retrieving the scaffold network from Omnipath
+Before running **CARNIVAL**, we need to create or upload a scaffold network.
+This will be _"the map"_ that the ILP algorithm will follow to find the causal network.
+We use **Omnipath** to obtain the signed and directed interactions from all the available resources.
+CARNIVAL requires this information in a _sif_ table (node1, interaction, node2) format,
+therefore we use the _consensus_ columns of direction (consensus_direction) and
+sign (consensus_stimulation and consensus_inhibition) to extract it.
+
+The query returns 0/1 as logic status of being a stimulation or an inhibition reaction. 
+Thus, this output is reformulated as 1/-1 to indicate stimulation or inhibition, respectively.
+We can keep either the interactions that are consistent, or both alternatives (e.g. A 1 B; A -1 B).
+In this example, we keep the consistent ones.
+
+```{r omnipathSIF, message=FALSE}
+omniR <- import_omnipath_interactions()
+  
+# signed and directed
+omnipath_sd <- omniR %>% dplyr::filter(consensus_direction == 1 & #directed with either inhibition or stimulation
+                                (consensus_stimulation == 1 | 
+                                 consensus_inhibition == 1
+                                 ))
+  
+# changing 0/1 criteria in consensus_stimulation/inhibition to -1/1 (converting *both* columns to 1 or -1 - either column indicated stimulation or inhibition)
+# inhibition denoted by -1, stimulation denoted by 1 regardless of column types
+omnipath_sd$consensus_stimulation[which(omnipath_sd$consensus_stimulation == 0)] = -1
+omnipath_sd$consensus_inhibition[which(omnipath_sd$consensus_inhibition == 1)] = -1
+omnipath_sd$consensus_inhibition[which(omnipath_sd$consensus_inhibition == 0)] = 1
+
+# check consistency on consensus sign and select only those in a SIF format
+sif <- omnipath_sd[,c('source_genesymbol', 'consensus_stimulation', 'consensus_inhibition', 'target_genesymbol')] %>%
+      dplyr::filter(consensus_stimulation==consensus_inhibition) %>%
+      unique.data.frame()
+
+sif$consensus_stimulation <- NULL
+colnames(sif) <- c('source', 'interaction', 'target')
+# remove complexes
+sif$source <- gsub(":", "_", sif$source)
+sif$target <- gsub(":", "_", sif$target)
+
+#save SIF
+write_tsv(sif, file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/omnipath/omnipath_carnival.tsv"))
+```
+
+## Transcription Factor and pathway activities for CARNIVAL
+We use the supplementary functions _generateTFList.r_ and _assignPROGENyScores.r_
+to shift the formats of tf_activities and PathwayActivity to the inputs required by CARNIVAL.
+
+**Select the inputs for CARNIVAL**
+Select either the aerobic or resistance exercise data to input in CARNIVAL
+
+```{r shiftFormats, message=FALSE}
+## DoRothEA for CARNIVAL
+# Aerobic excercise (AE)
+tf_activities_carnival <- data.frame(tf_activities_AE, stringsAsFactors = F)
+rownames(tf_activities_carnival) <- tf_activities_AE$TF
+tf_activities_carnival$TF <- NULL
+
+# # Resistance excercise (RE)
+# tf_activities_carnival <- data.frame(tf_activities_RE, stringsAsFactors = F)
+# rownames(tf_activities_carnival) <- tf_activities_RE$TF
+# tf_activities_carnival$TF <- NULL
+
+# TFs that target the RPS6KB1 gene: generate a list of TFs that specifically target RPS6KB1 (t-values included)
+tfList_RPS6KB1 = generateTFList(tf_activities_carnival, top="all", access_idx = 1)
+genesToKeep_RPS6KB1  = c("MEF2A", "EP300", "SNAI1", "UBTF", "DLX4", "BATF", "E2F1", "CEBPA", "NRF1", "FOXA1",
+                 "E2F2", "MYC", "ELF1", "ESR1", "CTCF", "GATA3", "SNAPC4", "YBX1", "HIF1A")
+RPS6KB1_specific_tfList_t = tfList_RPS6KB1$t[intersect(names(tfList_RPS6KB1$t), genesToKeep_RPS6KB1)]
+```
+
+**Select the inputs for CARNIVAL**
+Select either the aerobic or resistance exercise data to input in CARNIVAL
+
+```{r}
+## progeny for CARNIVAL
+#This function is used to account for the PROGENy scores in the objective function. 
+#It creates a list object with progeny scores for a selected set of samples (by default for all of them)
+load(file = system.file("progenyMembers.RData",package="CARNIVAL"))
+
+# Aerobic exercise (AE)
+PathwayActivity_carnival <- data.frame(PathwayActivity_AE, stringsAsFactors = F)
+rownames(PathwayActivity_carnival) <- PathwayActivity_carnival$Pathway
+PathwayActivity_carnival$Pathway <- NULL
+progenylist = assignPROGENyScores(progeny = t(PathwayActivity_carnival),
+                                            progenyMembers = progenyMembers,
+                                            id = "gene",
+                                            access_idx = 1)
+
+# # Resistance exercise (RE)
+# PathwayActivity_carnival <- data.frame(PathwayActivity_RE, stringsAsFactors = F)
+# rownames(PathwayActivity_carnival) <- PathwayActivity_carnival$Pathway
+# PathwayActivity_carnival$Pathway <- NULL
+# progenylist = assignPROGENyScores(progeny = t(PathwayActivity_carnival),
+#                                             progenyMembers = progenyMembers,
+#                                             id = "gene",
+#                                             access_idx = 1)
+
+saveRDS(progenylist, file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/progeny/myProgenyList.rds"))
+```
+
+## Running CARNIVAL
+CARNIVAL identifies the causal link between the activities of the transcription factors (TFs) and the 'perturbed' nodes.
+In the current version, we have 3 main inputs:
++ _measObj_: The TF activities (like the ones we have obtained from DoRothEA)
++ _inputObj_: The 'perturbed' nodes that we want CARNIVAL to connect with the TF activities. 
+There are 3 ways of inputting the 'perturbed' nodes:
+(1) Give the name and sign of the selected nodes; 
+(2) Give the name only, so the algorithm will select the sign that best fit the models,
+(3) Give _NULL_ as value will create a "Perturbation" node that will try both signs for all 'initial' nodes of the given network ( _netObj_ ). This is inverse CARNIVAL.
++ _netObj_: The network that will serve as map to connect the TFs' activities ( _measObj_ ) and the perturbed nodes ( _inputObj_ )
+
+Although it is not required, a fourth object called _weightObj_ can be also given. 
+This object gives values ranged from -1 to 1 for a set of nodes of the network.
+The aim of _weightObj_ is helping the solver to find optimal solutions faster.
+
+Please, check the [CARNIVAL](https://saezlab.github.io/CARNIVAL/) page for further information.
+For specific technical details, such as how to install different ILP solvers that CARNIVAL supports, check [CARNIVAL vignette](https://bioconductor.org/packages/release/bioc/vignettes/CARNIVAL/inst/doc/CARNIVAL.html).
+
+Here we apply **Standard CARNIVAL** to infer how canonical exercise sensors regulate TF activities
+```{r}
+## Targets of perturbation
+# Intracellular sensor proteins
+targets_intracellularSensors = c('PRKAA1','PRKAA2','PRKAB1','PRKAB2','PRKAG1','PRKAG2','PRKAG3', # AMPK isoforms
+                                 'CALM1','CALM2','CALM3','PPP3R1', # Calmodulin, calcineurin
+                                 'PRKACA', # cAMP
+                                 'MAP3K1','MAP3K2','MAP3K3','MAP3K4','MAP3K5','MAP3K6','MAP3K7','MAP3K8','MAP3K10','MAP3K11',
+                                 'MAP3K12','TAOK1', # MAP3Ks
+                                 'PTK2','YAP1','DGKZ','TTN','ITGA7','BAG3','FLNC', # Mechanosensors
+                                 'KEAP1', # Oxidative stress
+                                 'EGLN1', 'EGLN2', 'EGLN3', 'HIF1AN', # Prolyl hydroxylases
+                                 'SIRT1', 'SIRT3') # Sirtuins
+
+targets_hormoneReceptors = c('ADIPOR1','ADIPOR2', # Adiponectin
+                             'AR', # Androgen receptor
+                             'ADRB1', 'ADRB2', # beta-andrenergic receptor
+                             'GHR', # growth hormone
+                             'INSR', # insulin
+                             'IGF1R', #IGF-1
+                             'ACVR2A', 'ACVR2B', # Myostatin
+                             'TGFBR1', 'TFGBR2') #TGF-beta
+
+## Select combination of exercise sensors
+# # Intracellular sensors only
+# targets = targets_intracellularSensors
+
+# # Hormonal receptors only
+# targets = targets_hormoneReceptors
+
+# Combined (intracellular + hormonal)
+targets = c(targets_intracellularSensors, targets_hormoneReceptors)
+
+iniciators_std = base::data.frame(base::matrix(data = c(NaN), nrow = 1, ncol=length(targets)), stringsAsFactors = F)
+colnames(iniciators_std) = targets
+upstream_inputs <- iniciators_std
+
+# TFs that target RPS6KB1
+downstream_inputs <- RPS6KB1_specific_tfList_t
+```
+
+## PKN (no filtering/pruning)
+```{r}
+meta_network <- sif
+```
+
+## Standard CARNIVAL Analysis
+Ensure the following are appropriately coded for the analysis:
+1) Exercise condition: resistance exercise or aerobic exercise transcription factor activities
+2) Targets (upstream_inputs)
+3) TFs (downstream_inputs): RPS6KB1-specific TFs
+
+**Select the appropriate folder for the CARNIVAL outputs**
+Select either the aerobic or resistance exercise folder output the CARNIVAL results
+
+```{r carnival, message=FALSE}
+library(CARNIVAL)
+library(beepr)
+getwd()
+
+## inputs
+n_iterations = 30
+timeLimit = 600
+
+## select the appropriate output folder
+#Aerobic
+folder = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/carnivalNetworks/AerobicExercise/stdCARNIVAL")
+# # Resistance
+# folder = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/carnivalNetworks/ResistanceExercise/stdCARNIVAL")
+
+for (i in 1:n_iterations) {
+  
+  carnival_result = runCARNIVAL( inputObj = sample(upstream_inputs),
+                               measObj = sample(downstream_inputs),
+                               netObj =  meta_network,
+                               weightObj = sample(progenylist$score),
+                               solverPath = "/Applications/CPLEX_Studio2211/cplex/bin/x86-64_osx/cplex",
+                               solver = "cplex",
+                               timelimit = timeLimit,
+                               betaWeight = 0.2,
+                               alphaWeight = 1)
+
+ # save network
+  # rds file
+  timeStamp = Sys.time()
+  filename = paste0(format(timeStamp, "%Y%m%d_%H%M%S_"), "stdCARNIVAL_iteration", i, ".rds")
+  carnival_result$weightedSIF <- data.frame(carnival_result$weightedSIF, stringsAsFactors = F)
+  carnival_result$weightedSIF$Sign <- as.numeric(carnival_result$weightedSIF$Sign)
+  carnival_result$weightedSIF$Weight <- as.numeric(carnival_result$weightedSIF$Weight)
+  carnival_result$weightedSIF = carnival_result$weightedSIF[carnival_result$weightedSIF$Weight !=0,]
+  
+  carnival_result$nodesAttributes <- data.frame(carnival_result$nodesAttributes, stringsAsFactors = F)
+  carnival_result$nodesAttributes$ZeroAct <- as.numeric(carnival_result$nodesAttributes$ZeroAct)
+  carnival_result$nodesAttributes$UpAct <- as.numeric(carnival_result$nodesAttributes$UpAct)
+  carnival_result$nodesAttributes$DownAct <- as.numeric(carnival_result$nodesAttributes$DownAct)
+  carnival_result$nodesAttributes$AvgAct <- as.numeric(carnival_result$nodesAttributes$AvgAct)
+
+  saveRDS(carnival_result, file = paste(folder, filename, sep = "/"))
+  
+  # weightedSIF and nodeAttribute CSVs
+  filename_weightedSIF = paste0(format(timeStamp, "%Y%m%d_%H%M%S_"), "stdCARNIVAL_weightedSIF_iteration", i, ".csv")
+  filename_nodesAttributes = paste0(format(timeStamp, "%Y%m%d_%H%M%S_"), "stdCARNIVAL_nodeAttributes_iteration", i, ".csv")
+
+  write.csv(carnival_result$weightedSIF, paste(folder, filename_weightedSIF, sep = "/"))
+  write.csv(carnival_result$nodesAttributes, paste(folder, filename_nodesAttributes, sep = "/"))
+  
+  beep()
+}
+```
+
+
+### Aggregating the n iterations into a single, robust network
+# WeightedSIF (interactions)
+```{r}
+# Function to read the weightedSIF CSV files and aggregate by averaging the weights
+aggregate_weightedSIF <- function(file_paths, file_folder) {
+  # Initialize an empty data frame to store the aggregated results
+  aggregated_data <- data.frame(Node1 = character(),
+                                Sign = integer(),
+                                Node2 = character(),
+                                Weight = numeric(),
+                                stringsAsFactors = FALSE)
+  
+  # Loop through each CSV file
+  for (file in file_paths) {
+    # Read the current CSV file
+    df <- read.csv(file)
+    
+    # If the file is empty, skip it
+    if (nrow(df) == 0) next
+    
+    # Fill missing combinations of Node1, sign, and Node2 with Weight = 0
+    df$Weight[is.na(df$Weight)] <- 0  # Handle missing weight values
+    
+    # Merge the current data with the aggregated data
+    aggregated_data <- rbind(aggregated_data, df)
+  }
+  
+  # Aggregate by Node1, sign, Node2, and calculate the average weight
+  aggregated_data <- aggregated_data %>%
+    dplyr::group_by(Node1, Sign, Node2) %>%
+    dplyr::summarise(Weight = mean(Weight, na.rm = TRUE))
+  
+  # Write the result to a CSV file
+  timeStamp = Sys.time()
+  write.csv(aggregated_data, paste(file_folder, paste0(format(timeStamp, "%Y%m%d_%H%M%S_"), "aggregated_weightedSIF.csv"), sep = "/"), row.names = FALSE)
+  }
+
+# List of CSV files (adjust file paths accordingly)
+file_paths <- list.files(path = folder, pattern = "weightedSIF_.*\\.csv", full.names = TRUE)
+
+# Run the aggregation
+aggregate_weightedSIF(file_paths, folder)
+
+```
+
+## Node Attributes
+```{r}
+# Function to read nodeAttributes CSV files and aggregate by averaging the numeric columns
+aggregate_nodeAttributes <- function(file_paths, file_folder) {
+  # Initialize an empty data frame to store the aggregated results
+  aggregated_data <- data.frame(Node = character(),
+                                ZeroAct = numeric(),
+                                UpAct = numeric(),
+                                DownAct = numeric(),
+                                AvgAct = numeric(),
+                                NodeType = character(),
+                                stringsAsFactors = FALSE)
+  
+  # Loop through each CSV file
+  for (file in file_paths) {
+    # Read the current CSV file
+    df <- read.csv(file)
+    
+    # Remove the 'node number' column (untitled or unnamed column)
+    df <- df[, !(names(df) %in% c("X", "node number"))]  # Adjust "X" or "node number" as needed
+    
+    # If the file is empty, skip it
+    if (nrow(df) == 0) next
+    
+    # Merge the current data with the aggregated data
+    aggregated_data <- rbind(aggregated_data, df)
+  }
+  
+  # Aggregate by Node and calculate the average for the numeric columns
+  aggregated_data <- aggregated_data %>%
+    dplyr::group_by(Node) %>%
+    dplyr::summarise(
+      ZeroAct = mean(ZeroAct, na.rm = TRUE),
+      UpAct = mean(UpAct, na.rm = TRUE),
+      DownAct = mean(DownAct, na.rm = TRUE),
+      AvgAct = mean(AvgAct, na.rm = TRUE),
+      NodeType = paste(unique(NodeType), collapse = ", ")  # Keep unique NodeType values
+    )
+  
+  # Write the result to a CSV file
+  timeStamp = Sys.time()
+  write.csv(aggregated_data, paste(file_folder, paste0(format(timeStamp, "%Y%m%d_%H%M%S_"), "aggregated_nodeAttributes.csv"), sep = "/"), row.names = FALSE)
+}
+
+# List of CSV files (adjust file paths accordingly)
+file_paths <- list.files(path = folder, pattern = "nodeAttributes_.*\\.csv", full.names = TRUE)
+
+# Run the aggregation
+aggregate_nodeAttributes(file_paths, folder)
+
+```

@@ -1,0 +1,18 @@
+[2025-08-19 15:30:12] [INFO]    [OmnipathR] Welcome to OmnipathR!
+[2025-08-19 15:30:12] [TRACE]   [OmnipathR] Reading JSON from `/Users/taylormccoll/Library/Caches/OmnipathR/cache.json` (encoding: UTF-8).
+[2025-08-19 15:30:12] [TRACE]   [OmnipathR] JSON validation successful: TRUE
+[2025-08-19 15:30:12] [INFO]    [OmnipathR] Initialized cache: `/Users/taylormccoll/Library/Caches/OmnipathR`.
+[2025-08-19 15:30:12] [TRACE]   [OmnipathR] Reading JSON from `/Library/Frameworks/R.framework/Versions/4.3-arm64/Resources/library/OmnipathR/db/db_def.json` (encoding: UTF-8).
+[2025-08-19 15:30:12] [TRACE]   [OmnipathR] JSON validation successful: TRUE
+[2025-08-19 15:30:12] [TRACE]   [OmnipathR] Reading JSON from `/Library/Frameworks/R.framework/Versions/4.3-arm64/Resources/library/OmnipathR/internal/magic_bytes.json` (encoding: UTF-8).
+[2025-08-19 15:30:12] [TRACE]   [OmnipathR] JSON validation successful: TRUE
+[2025-08-19 15:30:12] [TRACE]   [OmnipathR] Reading JSON from `/Library/Frameworks/R.framework/Versions/4.3-arm64/Resources/library/OmnipathR/internal/urls.json` (encoding: UTF-8).
+[2025-08-19 15:30:12] [TRACE]   [OmnipathR] JSON validation successful: TRUE
+[2025-08-19 15:30:12] [TRACE]   [OmnipathR] Reading JSON from `/Library/Frameworks/R.framework/Versions/4.3-arm64/Resources/library/OmnipathR/internal/id_types.json` (encoding: UTF-8).
+[2025-08-19 15:30:12] [TRACE]   [OmnipathR] JSON validation successful: TRUE
+[2025-08-19 15:30:12] [TRACE]   [OmnipathR] Loaded data from RDS `/Users/taylormccoll/Library/Caches/OmnipathR/a7b21d9d80a3837a50268df16d168128fc1c6ede-1.rds`.
+[2025-08-19 15:30:12] [INFO]    [OmnipathR] Loaded from cache: `https://omnipathdb.org/interactions?genesymbols=yes&datasets=omnipath&organisms=9606&fields=sources,references,curation_effort&license=academic`
+[2025-08-19 15:30:13] [SUCCESS] [OmnipathR] Loaded 40014 interactions from cache.
+[2025-08-19 16:17:35] [TRACE]   [OmnipathR] Loaded data from RDS `/Users/taylormccoll/Library/Caches/OmnipathR/a7b21d9d80a3837a50268df16d168128fc1c6ede-1.rds`.
+[2025-08-19 16:17:35] [INFO]    [OmnipathR] Loaded from cache: `https://omnipathdb.org/interactions?genesymbols=yes&datasets=omnipath&organisms=9606&fields=sources,references,curation_effort&license=academic`
+[2025-08-19 16:17:36] [SUCCESS] [OmnipathR] Loaded 40014 interactions from cache.

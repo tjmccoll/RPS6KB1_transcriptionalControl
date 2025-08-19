@@ -1,0 +1,185 @@
+---
+title: "invCARNIVAL - robust approach"
+author: "Taylor McColl"
+date: "2025-08-19"
+output: html_document
+---
+
+### Introduction to file
+The following analysis is an alternative to the standard CARNIVAL analysis. In such, ensure the code leading up to the ""6: CARNIVAL network inference""Standard CARNIVAL Analysis" section (line 1394) in the "McColl_2025_RPS6KB1txnlControl_stdCarnival_250819.Rmd" file has been run prior to the following code. Running those lines generates the required variables needed to run the following Inverse CARNIVAL Analysis
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Update according to the root directory in which you saved the repository
+repo_root <- "/Users/taylormccoll/Documents/SFU/1. Ph.D./1. Research Projects/4. Bioinformatic analysis of p70S6K/3. Manuscript/2. Writing/Complete manuscript/250817_complete manuscript/Code"
+
+knitr::opts_knit$set(root.dir = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819"))
+```
+
+### Inverse CARNIVAL Analysis
+The following is a robust approach to generate inverse CARNIVAL results. We run
+n iterations of invCARNIVAL using randomized input vectors to introduce 
+stochasticity to the solution space explored by CPLEX. We aggregate the n 
+solution pool, which provides a robust invCARNIVAL network inference.
+
+Ensure the following are appropriately coded for the analysis:
+1) TFs (downstream_inputs): top TFs assessed by DoRothEA or RPS6KB1-specific TFs
+
+**Select the appropriate folder for the CARNIVAL outputs**
+Select either the aerobic or resistance exercise folder output the CARNIVAL results
+
+```{r carnival, message=FALSE}
+library(CARNIVAL)
+library(beepr)
+getwd()
+
+## inputs
+n_iterations = 30
+timeLimit = 600
+
+## select the appropriate output folder
+#Aerobic
+folder = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/carnivalNetworks/AerobicExercise/invCARNIVAL")
+
+# # Resistance
+# folder = file.path(repo_root, "McColl_2025_rps6kb1TranscriptionalControl_250819/Outputs/carnivalNetworks/ResistanceExercise/invCARNIVAL")
+
+
+for (i in 1:n_iterations) {
+  
+  print(paste0("interation", i))
+  
+  carnival_result = runCARNIVAL(measObj = sample(downstream_inputs),
+                                netObj =  meta_network,
+                                weightObj = sample(progenylist$score),
+                                solverPath ="/Applications/CPLEX_Studio2211/cplex/bin/x86-64_osx/cplex",
+                                solver = "cplex",
+                                timelimit = timeLimit,
+                                betaWeight = 0.2)
+
+  # save network
+  # rds file
+  timeStamp = Sys.time()
+  filename = paste0(format(timeStamp, "%Y%m%d_%H%M%S_"), "invCARNIVAL_iteration", i, ".rds")
+  carnival_result$weightedSIF <- data.frame(carnival_result$weightedSIF, stringsAsFactors = F)
+  carnival_result$weightedSIF$Sign <- as.numeric(carnival_result$weightedSIF$Sign)
+  carnival_result$weightedSIF$Weight <- as.numeric(carnival_result$weightedSIF$Weight)
+  carnival_result$weightedSIF = carnival_result$weightedSIF[carnival_result$weightedSIF$Weight !=0,]
+  
+  carnival_result$nodesAttributes <- data.frame(carnival_result$nodesAttributes, stringsAsFactors = F)
+  carnival_result$nodesAttributes$ZeroAct <- as.numeric(carnival_result$nodesAttributes$ZeroAct)
+  carnival_result$nodesAttributes$UpAct <- as.numeric(carnival_result$nodesAttributes$UpAct)
+  carnival_result$nodesAttributes$DownAct <- as.numeric(carnival_result$nodesAttributes$DownAct)
+  carnival_result$nodesAttributes$AvgAct <- as.numeric(carnival_result$nodesAttributes$AvgAct)
+
+  saveRDS(carnival_result, file = paste(folder, filename, sep = "/"))
+  
+  # weightedSIF and nodeAttribute CSVs
+  filename_weightedSIF = paste0(format(timeStamp, "%Y%m%d_%H%M%S_"), "invCARNIVAL_weightedSIF_iteration", i, ".csv")
+  filename_nodesAttributes = paste0(format(timeStamp, "%Y%m%d_%H%M%S_"), "invCARNIVAL_nodeAttributes_iteration", i, ".csv")
+
+  write.csv(carnival_result$weightedSIF, paste(folder, filename_weightedSIF, sep = "/"))
+  write.csv(carnival_result$nodesAttributes, paste(folder, filename_nodesAttributes, sep = "/"))
+  
+  beep()
+}
+```
+
+### Aggregating the n iterations into a single, robust network
+# WeightedSIF (interactions)
+```{r}
+# Function to read the weightedSIF CSV files and aggregate by averaging the weights
+aggregate_weightedSIF <- function(file_paths, file_folder) {
+  # Initialize an empty data frame to store the aggregated results
+  aggregated_data <- data.frame(Node1 = character(),
+                                Sign = integer(),
+                                Node2 = character(),
+                                Weight = numeric(),
+                                stringsAsFactors = FALSE)
+  
+  # Loop through each CSV file
+  for (file in file_paths) {
+    # Read the current CSV file
+    df <- read.csv(file)
+    
+    # If the file is empty, skip it
+    if (nrow(df) == 0) next
+    
+    # Fill missing combinations of Node1, sign, and Node2 with Weight = 0
+    df$Weight[is.na(df$Weight)] <- 0  # Handle missing weight values
+    
+    # Merge the current data with the aggregated data
+    aggregated_data <- rbind(aggregated_data, df)
+  }
+  
+  # Aggregate by Node1, sign, Node2, and calculate the average weight
+  aggregated_data <- aggregated_data %>%
+    dplyr::group_by(Node1, Sign, Node2) %>%
+    dplyr::summarise(Weight = mean(Weight, na.rm = TRUE))
+  
+  # Write the result to a CSV file
+  timeStamp = Sys.time()
+  write.csv(aggregated_data, paste(file_folder, paste0(format(timeStamp, "%Y%m%d_%H%M%S_"), "aggregated_weightedSIF.csv"), sep = "/"), row.names = FALSE)
+}
+
+# List of CSV files (adjust file paths accordingly)
+file_paths <- list.files(path = folder, pattern = "weightedSIF_.*\\.csv", full.names = TRUE)
+
+# Run the aggregation
+aggregate_weightedSIF(file_paths, folder)
+
+
+```
+
+## Node Attributes
+```{r}
+# Function to read nodeAttributes CSV files and aggregate by averaging the numeric columns
+aggregate_nodeAttributes <- function(file_paths, file_folder) {
+  # Initialize an empty data frame to store the aggregated results
+  aggregated_data <- data.frame(Node = character(),
+                                ZeroAct = numeric(),
+                                UpAct = numeric(),
+                                DownAct = numeric(),
+                                AvgAct = numeric(),
+                                NodeType = character(),
+                                stringsAsFactors = FALSE)
+  
+  # Loop through each CSV file
+  for (file in file_paths) {
+    # Read the current CSV file
+    df <- read.csv(file)
+    
+    # Remove the 'node number' column (untitled or unnamed column)
+    df <- df[, !(names(df) %in% c("X", "node number"))]  # Adjust "X" or "node number" as needed
+    
+    # If the file is empty, skip it
+    if (nrow(df) == 0) next
+    
+    # Merge the current data with the aggregated data
+    aggregated_data <- rbind(aggregated_data, df)
+  }
+  
+  # Aggregate by Node and calculate the average for the numeric columns
+  aggregated_data <- aggregated_data %>%
+    dplyr::group_by(Node) %>%
+    dplyr::summarise(
+      ZeroAct = mean(ZeroAct, na.rm = TRUE),
+      UpAct = mean(UpAct, na.rm = TRUE),
+      DownAct = mean(DownAct, na.rm = TRUE),
+      AvgAct = mean(AvgAct, na.rm = TRUE),
+      NodeType = paste(unique(NodeType), collapse = ", ")  # Keep unique NodeType values
+    )
+  
+  # Write the result to a CSV file
+  timeStamp = Sys.time()
+  write.csv(aggregated_data, paste(file_folder, paste0(format(timeStamp, "%Y%m%d_%H%M%S_"), "aggregated_nodeAttributes.csv"), sep = "/"), row.names = FALSE)
+}
+
+# List of CSV files (adjust file paths accordingly)
+file_paths <- list.files(path = folder, pattern = "nodeAttributes_.*\\.csv", full.names = TRUE)
+
+# Run the aggregation
+aggregate_nodeAttributes(file_paths, folder)
+
+```
