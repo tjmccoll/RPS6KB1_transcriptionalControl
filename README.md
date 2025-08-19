@@ -16,12 +16,29 @@ Download the package to a local folder (e.g., '~/RPS6KB1_transcriptionalControl/
 ```
 git clone https://github.com/tjmccoll/MuscleProteinSynthesisKineticModel.git
 ```
+CARNIVAL requires an interaction solver for the network optimizer. Here, we have used IBM ILOG Cplex, which is freely available through the Academic Initiative ([available here](https://www.ibm.com/products/ilog-cplex-optimization-studio)). CARNIVAL can also use other solvers including Gurobi and CBC-COIN, which are further disucssed on the [CARNIVAL source page](https://saezlab.github.io/CARNIVAL/).
 
+### Running the code
+To simulate the manuscript code:
+1. Open the 'McColl_2025_RPS6KB1txnlControl_stdCarnival_250819.Rmd' or 'McColl_2025_RPS6KB1txnlControl_invCarnival_250819.Rmd' R Markdown file from the 'R file' folder. These R files run the standard or inverse CARNIVAL approaches, respectively.
+2. Update the 'repo_root' variable on line 6 to the file path that contains the locally saved 'McColl_2025_rps6kb1TranscriptionalControl_250819' folder.
+3. Run each section of the script.
+4. The CARNIVAL network inference code (section 6) includes details for commenting in/out lines of code to run CARNIVAL with either the aerobic or resistance exercise data.
 
-
-
-
-
+### File list
+#### Dickinson_2018
+* 'GSE107934_RAW': contains the raw RNAseq count data from Dickinson et al. 2018
+#### Outputs
+* 'carnivalNetworks': contains folders for the file outputs for the standard and inverse CARNIVAL network inference using the aerobic or resistance exercise data.
+* 'Data': data files generated within the code are saved here.
+* 'dorothea': DoRothEA specific outputs are saved here.
+* 'Figures': figures generated within the code are saved here.
+* 'omnipath': details of the OmniPath prior knowledge network are saved here.
+* 'progeny': PROGENy specific outputs are saved here.
+#### R file
+* The stdCARNIVAL or invCARNIVAL R markdown files are contained here.
+#### Support
+* Various support functions for the markdown files are contained here.
 
 ## Contact
 tmccoll@sfu.ca
